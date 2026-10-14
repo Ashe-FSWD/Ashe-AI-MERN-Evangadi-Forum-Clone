@@ -2,6 +2,7 @@ import express from "express";
 import {
   authenticateUser,
   authorizeAdmin,
+  authorizeSuperAdmin,
 } from "../../../middleware/authentication.js";
 import {
   getAdminStatsController,
@@ -35,6 +36,7 @@ router.get("/stats", getAdminStatsController);
 router.get("/users", listUsersController);
 router.patch(
   "/users/:userId/role",
+  authorizeSuperAdmin,
   updateUserRoleValidation,
   updateUserRoleController,
 );
@@ -43,7 +45,12 @@ router.patch(
   updateUserStatusValidation,
   updateUserStatusController,
 );
-router.delete("/users/:userId", deleteUserValidation, deleteUserController);
+router.delete(
+  "/users/:userId",
+  authorizeSuperAdmin,
+  deleteUserValidation,
+  deleteUserController,
+);
 
 router.get("/questions", listQuestionsController);
 router.delete(

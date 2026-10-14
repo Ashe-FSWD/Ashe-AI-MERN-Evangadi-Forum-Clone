@@ -1,9 +1,0 @@
-◇ injected env (23) from .env // tip: ⌘ custom filepath { path: '/custom/path/.env' }
-Database connection established successfully.
-Server running on port http://localhost:3999
-[RAG search] doc=19 chunks=117 queryDim=3072 storeDim=3072 threshold=0.2 topScores=0.7378, 0.6773, 0.6670, 0.6651, 0.6609
-[RAG search] doc=19 chunks=117 queryDim=3072 storeDim=3072 threshold=0.2 topScores=0.6909, 0.6900, 0.6821, 0.6780, 0.6729
-◇ injected env (0) from .env // tip: ◈ encrypted .env [www.dotenvx.com]
-[RAG search] doc=20 chunks=117 queryDim=3072 storeDim=3072 threshold=0.2 topScores=0.6840, 0.6770, 0.6707, 0.6630, 0.6618
-[RAG search] doc=17 chunks=117 queryDim=3072 storeDim=3072 threshold=0.2 topScores=0.6070, 0.6021, 0.6019, 0.6019, 0.6009
-[RAG search] doc=17 chunks=117 queryDim=3072 storeDim=3072 threshold=0.2 topScores=0.6070, 0.6021, 0.6019, 0.6019, 0.6009

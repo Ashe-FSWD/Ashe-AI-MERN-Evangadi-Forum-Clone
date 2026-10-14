@@ -157,6 +157,17 @@ export default function QuestionDetail() {
     setIsPosting(true);
     try {
       const result = await answerService.postAnswer(question.id, trimmed);
+      if (result.data?.status === "pending_review") {
+        setAnswerText("");
+
+        setPostSuccess(
+          "Your answer was submitted for Super Admin review. " +
+            "It will appear after approval.",
+        );
+
+        setIsPosting(false);
+        return;
+      }
       setAnswers((prev) => [...prev, result.data]);
       setAnswerText("");
       setPostSuccess("Answer posted successfully.");
@@ -307,7 +318,7 @@ export default function QuestionDetail() {
 
       {isLoading && (
         <div
-          className={`${ui.pageStates__message} ${ui["pageStates__message--loading"]}`}
+          className={`${ui.pageStates__message}${ui["pageStates__message--loading"]}`}
           role="status"
         >
           <div className={styles.questionDetailSpinner} aria-hidden />
@@ -317,7 +328,7 @@ export default function QuestionDetail() {
 
       {!isLoading && error && (
         <div
-          className={`${ui.pageStates__message} ${ui["pageStates__message--error"]}`}
+          className={`${ui.pageStates__message}${ui["pageStates__message--error"]}`}
           role="alert"
         >
           <div className={styles.questionDetailErrorInner}>
@@ -392,7 +403,7 @@ export default function QuestionDetail() {
                       )}
                       {answer.aiGrade && (
                         <span
-                          className={`${styles.answerGrade} ${
+                          className={`${styles.answerGrade}${
                             styles[`answerGrade${answer.aiGrade}`]
                           }`}
                           title="Gemini AI recommendation"
@@ -424,7 +435,7 @@ export default function QuestionDetail() {
                       </button>
                       <button
                         type="button"
-                        className={`${styles.voteButton} ${
+                        className={`${styles.voteButton}${
                           answer.myVote === 1
                             ? styles.voteButtonActiveUp
                             : styles.voteButtonUp
@@ -442,7 +453,7 @@ export default function QuestionDetail() {
                       </button>
                       <button
                         type="button"
-                        className={`${styles.voteButton} ${
+                        className={`${styles.voteButton}${
                           answer.myVote === -1
                             ? styles.voteButtonActiveDown
                             : styles.voteButtonDown

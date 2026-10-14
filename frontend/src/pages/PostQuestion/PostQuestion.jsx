@@ -1,7 +1,8 @@
 /**
  * Post Question: ask a new question with an optional AI draft coach.
  * The coach runs `POST /api/questions/draft-coach`, creation runs
- * `POST /api/questions` and redirects to the new thread.
+ * `POST /api/questions` and redirects to the new thread or displays a
+ * moderation pending message.
  */
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -84,6 +85,22 @@ export default function PostQuestion() {
         title: formData.title.trim(),
         content: formData.content.trim(),
       });
+
+      if (result.data?.status === "pending_review") {
+        setSuccess(
+          "Your question was submitted for Super Admin review. " +
+            "It will appear in the forum after approval.",
+        );
+
+        setFormData({
+          title: "",
+          content: "",
+        });
+
+        setIsSubmitting(false);
+        return;
+      }
+
       setSuccess("Question posted successfully.");
       const hash = result.data?.questionHash;
       navigate(hash ? `/questions/${hash}` : "/dashboard", { replace: true });

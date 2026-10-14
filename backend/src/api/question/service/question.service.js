@@ -1,57 +1,74 @@
 import { safeExecute } from "../../../../db/config.js";
 import { NotFoundError } from "../../../utils/errors/index.js";
+
+// Moderation by Gemini
+import { analyzeAndStoreModerationService } from "../../moderation/service/moderation.service.js";
+
 import {
   cosineSimilarity,
   parseEmbedding,
   generateHexHash,
 } from "../../../utils/vector.js";
+
 import { embedText } from "../../../services/gemini.service.js";
 
 // gemini-embedding-001 scores related content ~0.5-0.74 and unrelated ~0.3-0.7,
 // so a strict threshold like 0.75 filters out everything. Keep the default low.
 const RECOMMEND_THRESHOLD = Number(process.env.RECOMMEND_THRESHOLD) || 0.2;
-// The dashboard AI search should list only genuinely similar questions, so it
-// uses a stricter threshold (0.6) and a small result cap (2) than the looser
-// "similar questions" sidebar. With gemini-embedding-001, unrelated content can
-// still score ~0.6, so limiting to the top matches is what keeps results tight.
+
+// The dashboard AI search should list only genuinely similar questions,
+// so it uses a stricter threshold (0.6) and a small result cap (2).
 const SEMANTIC_SEARCH_THRESHOLD =
   Number(process.env.SEMANTIC_SEARCH_THRESHOLD) || 0.6;
+
 const SEMANTIC_SEARCH_K = Number(process.env.SEMANTIC_SEARCH_K) || 2;
+
 const RECOMMEND_K = Number(process.env.RECOMMEND_K) || 10;
+
 const DEFAULT_ANSWERS_LIMIT = 100;
 
 /**
- * Thread ranking blends AI relevance (cosine of question↔answer embeddings)
- * with the net vote score. Both weights must sum conceptually to 1 but are
- * kept independent so they can be tuned in .env.
+ * Thread ranking blends AI relevance
+ * with the net vote score.
  */
 const ANSWER_RANK_AI_WEIGHT = Number(process.env.ANSWER_RANK_AI_WEIGHT) || 0.5;
+
 const ANSWER_RANK_VOTE_WEIGHT =
   Number(process.env.ANSWER_RANK_VOTE_WEIGHT) || 0.5;
 
 /**
- * Gemini AI-score thresholds used to grade answers as Good / Moderate / Low
- * when a stored grade is not yet available. Based on gemini-embedding-001
- * cosine behavior for related content (~0.5-0.74).
+ * Gemini AI-score thresholds used to grade answers
+ * as Good / Moderate / Low.
  */
 const ANSWER_GOOD_MIN = Number(process.env.ANSWER_GOOD_MIN) || 0.6;
+
 const ANSWER_MODERATE_MIN = Number(process.env.ANSWER_MODERATE_MIN) || 0.45;
 
 /**
- * Maps an AI relevance score (0-1) to a Gemini recommendation label.
+ * Maps an AI relevance score to a recommendation label.
  *
- * @param {number} score - Cosine similarity of question↔answer embeddings.
- * @returns {'Good' | 'Moderate' | 'Low' | null} Null when there is no score.
+ * @param {number} score
+ * @returns {'Good' | 'Moderate' | 'Low' | null}
  */
 function gradeFromScore(score) {
-  if (!Number.isFinite(score) || score <= 0) return null;
-  if (score >= ANSWER_GOOD_MIN) return "Good";
-  if (score >= ANSWER_MODERATE_MIN) return "Moderate";
+  if (!Number.isFinite(score) || score <= 0) {
+    return null;
+  }
+
+  if (score >= ANSWER_GOOD_MIN) {
+    return "Good";
+  }
+
+  if (score >= ANSWER_MODERATE_MIN) {
+    return "Moderate";
+  }
+
   return "Low";
 }
 
 /**
- * Maps a flat questions JOIN users JOIN answers row to the API question shape.
+ * Maps a flat questions JOIN users JOIN answers row
+ * to the API question shape.
  */
 function mapQuestionRow(row) {
   return {
@@ -62,6 +79,7 @@ function mapQuestionRow(row) {
     answerCount: Number(row.answerCount) || 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+
     author: {
       id: row.user_id,
       firstName: row.first_name,
@@ -71,14 +89,20 @@ function mapQuestionRow(row) {
 }
 
 /**
- * Hydrates question detail rows from a list of question ids, preserving the
- * original order of `ids`.
+ * Hydrates question detail rows from a list of question ids.
  *
- * @param {number[]} ids - Question ids to fetch.
- * @returns {Promise<Array>} Mapped question objects (empty when ids is empty).
+ * IMPORTANT:
+ * Only visible questions are returned.
+ *
+ * Hidden answers are also excluded from answerCount.
+ *
+ * @param {number[]} ids
+ * @returns {Promise<Array>}
  */
 async function hydrateQuestionDetails(ids) {
-  if (!Array.isArray(ids) || ids.length === 0) return [];
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return [];
+  }
 
   const sql = `
     SELECT
@@ -88,20 +112,42 @@ async function hydrateQuestionDetails(ids) {
       q.content,
       q.created_at,
       q.updated_at,
+
       u.user_id,
       u.first_name,
       u.last_name,
+
       COUNT(a.answer_id) AS answerCount
+
     FROM questions q
-    JOIN users u ON u.user_id = q.user_id
-    LEFT JOIN answers a ON a.question_id = q.question_id
-    WHERE q.question_id IN (${ids.map(() => "?").join(",")})
+
+    JOIN users u
+      ON u.user_id = q.user_id
+
+    LEFT JOIN answers a
+      ON a.question_id = q.question_id
+     AND a.is_hidden = FALSE
+
+    WHERE q.question_id IN (
+      ${ids.map(() => "?").join(",")}
+    )
+
+      AND q.is_hidden = FALSE
+
     GROUP BY
-      q.question_id, q.question_hash, q.title, q.content,
-      q.created_at, q.updated_at, u.user_id, u.first_name, u.last_name
+      q.question_id,
+      q.question_hash,
+      q.title,
+      q.content,
+      q.created_at,
+      q.updated_at,
+      u.user_id,
+      u.first_name,
+      u.last_name
   `;
 
   const rows = await safeExecute(sql, ids);
+
   const byId = new Map(
     rows.map((row) => [row.question_id, mapQuestionRow(row)]),
   );
@@ -110,13 +156,34 @@ async function hydrateQuestionDetails(ids) {
 }
 
 /**
- * Creates a question and (best-effort) stores its vector embedding.
+ * Creates a question and stores its vector embedding
+ * when the question is approved.
  *
- * @param {Object} input
- * @param {string} input.title - Question title.
- * @param {string} input.content - Question body.
- * @param {number} input.userId - Authenticated user id.
- * @returns {Promise<Object>} Question summary with the generated hash.
+ * New questions start hidden.
+ *
+ * Normal question:
+ *
+ * INSERT
+ *   ↓
+ * is_hidden = TRUE
+ *   ↓
+ * AI moderation
+ *   ↓
+ * normal
+ *   ↓
+ * is_hidden = FALSE
+ *   ↓
+ * embedding
+ *
+ * Flagged question:
+ *
+ * INSERT
+ *   ↓
+ * is_hidden = TRUE
+ *   ↓
+ * AI moderation
+ *   ↓
+ * Super Admin review
  */
 export const createQuestionWithVectorService = async ({
   title,
@@ -125,64 +192,141 @@ export const createQuestionWithVectorService = async ({
 }) => {
   const questionHash = generateHexHash(16);
 
-  const insertSql =
-    "INSERT INTO questions (question_hash, user_id, title, content) VALUES (?, ?, ?, ?)";
+  /*
+   * New questions start hidden.
+   *
+   * This prevents a question that requires moderation
+   * from being publicly visible before review.
+   */
+  const insertSql = `
+    INSERT INTO questions
+      (
+        question_hash,
+        user_id,
+        title,
+        content,
+        is_hidden
+      )
+    VALUES (?, ?, ?, ?, TRUE)
+  `;
+
   const insertResult = await safeExecute(insertSql, [
     questionHash,
     userId,
     title,
     content,
   ]);
+
   const questionId = insertResult.insertId;
 
+  const createdQuestion = {
+    id: questionId,
+    questionHash,
+    title,
+    content,
+    userId,
+  };
+
+  /*
+   * AI MODERATION
+   */
+  const moderation = await analyzeAndStoreModerationService({
+    contentType: "question",
+    contentId: questionId,
+    content: `${title}\n\n${content}`,
+    userId,
+  });
+
+  /*
+   * If moderation is required:
+   *
+   * - question remains hidden
+   * - no public question is shown
+   * - no public search result is created
+   */
+  if (moderation.flagged) {
+    return {
+      ...createdQuestion,
+      status: "pending_review",
+      reportId: moderation.reportId,
+    };
+  }
+
+  /*
+   * Normal content is made visible by
+   * the moderation service.
+   *
+   * Now create the semantic-search vector.
+   */
   const sourceText = `${title}\n\n${content}`;
 
   try {
     const vector = await embedText(sourceText, "RETRIEVAL_DOCUMENT");
-    const vectorSql =
-      "INSERT INTO question_vectors (question_id, source_text, embedding, status) VALUES (?, ?, ?, ?)";
-    await safeExecute(vectorSql, [
-      questionId,
-      sourceText,
-      JSON.stringify(vector),
-      "ready",
-    ]);
+
+    await safeExecute(
+      `INSERT INTO question_vectors
+        (
+          question_id,
+          source_text,
+          embedding,
+          status
+        )
+       VALUES (?, ?, ?, 'ready')`,
+      [questionId, sourceText, JSON.stringify(vector)],
+    );
   } catch (_error) {
-    // Embedding failure should not block question creation; record it instead.
-    const vectorSql =
-      "INSERT INTO question_vectors (question_id, source_text, embedding, status) VALUES (?, ?, ?, ?)";
-    await safeExecute(vectorSql, [
-      questionId,
-      sourceText,
-      JSON.stringify([]),
-      "failed",
-    ]);
+    await safeExecute(
+      `INSERT INTO question_vectors
+        (
+          question_id,
+          source_text,
+          embedding,
+          status
+        )
+       VALUES (?, ?, ?, 'failed')`,
+      [questionId, sourceText, JSON.stringify([])],
+    );
   }
 
-  return { id: questionId, questionHash, title, content, userId };
+  return {
+    ...createdQuestion,
+    status: "published",
+  };
 };
 
 /**
- * Lists questions with optional keyword (`search`) and ownership (`mine`) filters.
+ * Lists visible questions.
  *
- * @param {Object} input
- * @param {string} [input.search] - LIKE filter over title/content.
- * @param {string} [input.mine] - 'true' filters to the authenticated user.
- * @param {number} input.userId - Authenticated user id.
- * @returns {Promise<Object>} `{ data, meta }`.
+ * Supports:
+ *
+ * search = keyword search
+ * mine = authenticated user's questions
+ *
+ * IMPORTANT:
+ * Hidden questions are never returned.
  */
 export const getQuestionsService = async ({ search, mine, userId }) => {
-  const conditions = [];
+  /*
+   * IMPORTANT:
+   *
+   * Every normal question-list query starts
+   * by excluding hidden questions.
+   */
+  const conditions = ["q.is_hidden = FALSE"];
+
   const params = [];
 
   if (search && search.trim()) {
     const term = `%${search.trim()}%`;
+
     conditions.push("(q.title LIKE ? OR q.content LIKE ?)");
+
     params.push(term, term);
   }
 
   if (mine === "true" || mine === "1" || mine === true) {
     conditions.push("q.user_id = ?");
+
     params.push(userId);
   }
 
@@ -197,17 +341,35 @@ export const getQuestionsService = async ({ search, mine, userId }) => {
       q.content,
       q.created_at,
       q.updated_at,
+
       u.user_id,
       u.first_name,
       u.last_name,
+
       COUNT(a.answer_id) AS answerCount
+
     FROM questions q
-    JOIN users u ON u.user_id = q.user_id
-    LEFT JOIN answers a ON a.question_id = q.question_id
+
+    JOIN users u
+      ON u.user_id = q.user_id
+
+    LEFT JOIN answers a
+      ON a.question_id = q.question_id
+     AND a.is_hidden = FALSE
+
     ${whereClause}
+
     GROUP BY
-      q.question_id, q.question_hash, q.title, q.content,
-      q.created_at, q.updated_at, u.user_id, u.first_name, u.last_name
+      q.question_id,
+      q.question_hash,
+      q.title,
+      q.content,
+      q.created_at,
+      q.updated_at,
+      u.user_id,
+      u.first_name,
+      u.last_name
+
     ORDER BY q.created_at DESC
   `;
 
@@ -215,6 +377,7 @@ export const getQuestionsService = async ({ search, mine, userId }) => {
 
   return {
     data: rows.map(mapQuestionRow),
+
     meta: {
       limit: DEFAULT_ANSWERS_LIMIT,
       total: rows.length,
@@ -225,31 +388,52 @@ export const getQuestionsService = async ({ search, mine, userId }) => {
 };
 
 /**
- * Computes AI relevance scores (cosine of the question embedding vs each
- * answer embedding). Answers without a ready vector are simply absent from
- * the returned map and treated as score 0.
+ * Computes AI relevance scores for answers.
  *
- * @param {number} questionId - Source question id.
- * @param {number[]} answerIds - Answer ids in the thread.
- * @returns {Promise<Map<number, number>>} answerId → cosine score.
+ * Only ready answer vectors are used.
+ *
+ * @param {number} questionId
+ * @param {number[]} answerIds
+ * @returns {Promise<Map<number, number>>}
  */
 async function computeAnswerAiScores(questionId, answerIds) {
-  if (answerIds.length === 0) return new Map();
+  if (answerIds.length === 0) {
+    return new Map();
+  }
 
-  const questionVectorSql =
-    "SELECT embedding FROM question_vectors WHERE question_id = ? AND status = 'ready' LIMIT 1";
+  const questionVectorSql = `
+    SELECT embedding
+    FROM question_vectors
+    WHERE question_id = ?
+      AND status = 'ready'
+    LIMIT 1
+  `;
+
   const questionVectorRows = await safeExecute(questionVectorSql, [questionId]);
-  if (questionVectorRows.length === 0) return new Map();
+
+  if (questionVectorRows.length === 0) {
+    return new Map();
+  }
 
   const questionVector = parseEmbedding(questionVectorRows[0].embedding);
-  if (questionVector.length === 0) return new Map();
+
+  if (questionVector.length === 0) {
+    return new Map();
+  }
 
   const placeholders = answerIds.map(() => "?").join(",");
+
   const answerVectorSql = `
-    SELECT answer_id, embedding
+    SELECT
+      answer_id,
+      embedding
+
     FROM answer_vectors
-    WHERE status = 'ready' AND answer_id IN (${placeholders})
+
+    WHERE status = 'ready'
+      AND answer_id IN (${placeholders})
   `;
+
   const answerVectorRows = await safeExecute(answerVectorSql, answerIds);
 
   return new Map(
@@ -261,21 +445,25 @@ async function computeAnswerAiScores(questionId, answerIds) {
 }
 
 /**
- * Ranks answers in place by a blended score of AI relevance and net votes.
- * Votes are min–max normalized across the thread (with a 0 baseline) so a
- * five-upvote answer and a one-upvote answer differ meaningfully.
+ * Ranks answers by:
  *
- * @param {Array} answers - Answer objects (mutated in place).
+ * AI relevance
+ * +
+ * vote score
  */
 function rankAnswers(answers) {
   const votes = answers.map((answer) => answer.voteCount);
+
   const maxVote = Math.max(...votes, 0);
+
   const minVote = Math.min(...votes, 0);
+
   const range = maxVote - minVote;
 
   answers.forEach((answer) => {
     const normalizedVote =
       range > 0 ? (answer.voteCount - minVote) / range : 0.5;
+
     answer.combinedScore =
       ANSWER_RANK_AI_WEIGHT * answer.aiScore +
       ANSWER_RANK_VOTE_WEIGHT * normalizedVote;
@@ -293,14 +481,26 @@ function rankAnswers(answers) {
 }
 
 /**
- * Fetches a single question with its answers.
+ * Fetches a single visible question
+ * with its visible answers.
  *
- * @param {string} questionHash - 16-char hex hash.
- * @param {number} [userId] - Authenticated user id (for the viewer's votes on answers).
- * @returns {Promise<Object>} `{ question, answers, answersMeta }`.
- * @throws {NotFoundError} When the question does not exist.
+ * Hidden question:
+ *     NOT FOUND
+ *
+ * Hidden answer:
+ *     NOT RETURNED
+ *
+ * @param {string} questionHash
+ * @param {number} [userId]
+ * @returns {Promise<Object>}
  */
 export const getSingleQuestionService = async (questionHash, userId) => {
+  /*
+   * PART 12:
+   *
+   * A hidden question cannot be opened
+   * through Question Detail.
+   */
   const questionSql = `
     SELECT
       q.question_id,
@@ -309,12 +509,19 @@ export const getSingleQuestionService = async (questionHash, userId) => {
       q.content,
       q.created_at,
       q.updated_at,
+
       u.user_id,
       u.first_name,
       u.last_name
+
     FROM questions q
-    JOIN users u ON u.user_id = q.user_id
+
+    JOIN users u
+      ON u.user_id = q.user_id
+
     WHERE q.question_hash = ?
+      AND q.is_hidden = FALSE
+
     LIMIT 1
   `;
 
@@ -326,6 +533,9 @@ export const getSingleQuestionService = async (questionHash, userId) => {
 
   const questionRow = questionRows[0];
 
+  /*
+   * Hidden answers are excluded.
+   */
   const answersSql = `
     SELECT
       a.answer_id,
@@ -333,22 +543,65 @@ export const getSingleQuestionService = async (questionHash, userId) => {
       a.content,
       a.created_at,
       a.updated_at,
+
       u.user_id,
       u.first_name,
       u.last_name,
-      COALESCE(SUM(v.vote), 0) AS voteCount,
-      COALESCE(SUM(v.vote = 1), 0) AS upVotes,
-      COALESCE(SUM(v.vote = -1), 0) AS downVotes,
-      IFNULL(MAX(CASE WHEN v.user_id = ? THEN v.vote END), 0) AS myVote,
+
+      COALESCE(
+        SUM(v.vote),
+        0
+      ) AS voteCount,
+
+      COALESCE(
+        SUM(v.vote = 1),
+        0
+      ) AS upVotes,
+
+      COALESCE(
+        SUM(v.vote = -1),
+        0
+      ) AS downVotes,
+
+      IFNULL(
+        MAX(
+          CASE
+            WHEN v.user_id = ?
+            THEN v.vote
+          END
+        ),
+        0
+      ) AS myVote,
+
       av.ai_grade
+
     FROM answers a
-    JOIN users u ON u.user_id = a.user_id
-    LEFT JOIN answer_votes v ON v.answer_id = a.answer_id
-    LEFT JOIN answer_vectors av ON av.answer_id = a.answer_id
+
+    JOIN users u
+      ON u.user_id = a.user_id
+
+    LEFT JOIN answer_votes v
+      ON v.answer_id = a.answer_id
+
+    LEFT JOIN answer_vectors av
+      ON av.answer_id = a.answer_id
+
     WHERE a.question_id = ?
+      AND a.is_hidden = FALSE
+
     GROUP BY
-      a.answer_id, a.question_id, a.content, a.created_at, a.updated_at,
-      u.user_id, u.first_name, u.last_name, av.ai_grade
+      a.answer_id,
+      a.question_id,
+      a.content,
+      a.created_at,
+      a.updated_at,
+
+      u.user_id,
+      u.first_name,
+      u.last_name,
+
+      av.ai_grade
+
     ORDER BY a.created_at ASC
   `;
 
@@ -362,14 +615,21 @@ export const getSingleQuestionService = async (questionHash, userId) => {
     content: row.content,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+
     voteCount: Number(row.voteCount) || 0,
+
     upVotes: Number(row.upVotes) || 0,
+
     downVotes: Number(row.downVotes) || 0,
+
     myVote: Number(row.myVote) || 0,
+
     aiGrade: row.ai_grade || null,
+
     aiScore: 0,
     combinedScore: 0,
     rank: 1,
+
     author: {
       id: row.user_id,
       firstName: row.first_name,
@@ -377,41 +637,58 @@ export const getSingleQuestionService = async (questionHash, userId) => {
     },
   }));
 
-  // AI relevance ranking: compare each answer embedding with the question
-  // embedding, then blend with votes. Missing vectors score 0 (votes only).
+  /*
+   * AI relevance ranking.
+   */
   if (answers.length > 0) {
     const aiScores = await computeAnswerAiScores(
       questionRow.question_id,
       answers.map((answer) => answer.id),
     );
+
     answers.forEach((answer) => {
       const score = Math.max(0, aiScores.get(answer.id) ?? 0);
+
       answer.aiScore = score;
+
       if (!answer.aiGrade) {
         answer.aiGrade = gradeFromScore(score);
       }
     });
+
     rankAnswers(answers);
   }
 
   return {
     question: {
       id: questionRow.question_id,
+
       questionHash: questionRow.question_hash,
+
       title: questionRow.title,
+
       content: questionRow.content,
+
       answerCount: answers.length,
+
       createdAt: questionRow.created_at,
+
       updatedAt: questionRow.updated_at,
+
       author: {
         id: questionRow.user_id,
+
         firstName: questionRow.first_name,
+
         lastName: questionRow.last_name,
       },
     },
+
     answers,
+
     answersMeta: {
       limit: DEFAULT_ANSWERS_LIMIT,
+
       total: answers.length,
     },
   };
@@ -420,44 +697,113 @@ export const getSingleQuestionService = async (questionHash, userId) => {
 /**
  * Forum-wide summary counts for the user dashboard.
  *
+ * IMPORTANT:
+ * Hidden content is excluded.
+ *
  * @param {Object} input
- * @param {number} input.userId - Authenticated user id.
- * @returns {Promise<Object>} `{ totalQuestions, totalReplies, answeredQuestions, myQuestions }`.
+ * @param {number} input.userId
+ * @returns {Promise<Object>}
  */
 export const getDashboardStatsService = async ({ userId }) => {
+  /*
+   * PART 13
+   *
+   * Count only visible questions.
+   */
   const [totalQuestions] = await safeExecute(
-    "SELECT COUNT(*) AS n FROM questions",
+    `
+          SELECT COUNT(*) AS n
+          FROM questions
+          WHERE is_hidden = FALSE
+        `,
     [],
   );
+
+  /*
+   * Count only visible answers.
+   */
   const [totalReplies] = await safeExecute(
-    "SELECT COUNT(*) AS n FROM answers",
+    `
+          SELECT COUNT(*) AS n
+          FROM answers
+          WHERE is_hidden = FALSE
+        `,
     [],
   );
+
+  /*
+   * Count questions that have at least
+   * one visible answer AND are themselves visible.
+   *
+   * This is safer than counting answers only,
+   * because a hidden question should not appear
+   * as an answered question.
+   */
   const [answeredQuestions] = await safeExecute(
-    "SELECT COUNT(DISTINCT question_id) AS n FROM answers",
+    `
+          SELECT COUNT(
+            DISTINCT a.question_id
+          ) AS n
+
+          FROM answers a
+
+          JOIN questions q
+            ON q.question_id =
+               a.question_id
+
+          WHERE a.is_hidden = FALSE
+            AND q.is_hidden = FALSE
+        `,
     [],
   );
+
+  /*
+   * My Questions:
+   * only the current user's visible questions.
+   */
   const [myQuestions] = await safeExecute(
-    "SELECT COUNT(*) AS n FROM questions WHERE user_id = ?",
+    `
+          SELECT COUNT(*) AS n
+          FROM questions
+          WHERE user_id = ?
+            AND is_hidden = FALSE
+        `,
     [userId],
   );
 
   return {
     totalQuestions: Number(totalQuestions.n) || 0,
+
     totalReplies: Number(totalReplies.n) || 0,
+
     answeredQuestions: Number(answeredQuestions.n) || 0,
+
     myQuestions: Number(myQuestions.n) || 0,
   };
 };
 
 /**
- * Performs semantic search over stored question embeddings.
+ * Performs semantic search over stored
+ * question embeddings.
+ *
+ * PART 14
+ *
+ * IMPORTANT:
+ * A vector by itself is not enough.
+ *
+ * We JOIN question_vectors to questions
+ * and check:
+ *
+ * q.is_hidden = FALSE
+ *
+ * This prevents hidden questions from
+ * appearing in semantic search.
  *
  * @param {Object} input
- * @param {string} input.query - Search text (min 5 chars).
- * @param {number} [input.k] - Max results.
- * @param {number} [input.threshold] - Minimum cosine score.
- * @returns {Promise<Object>} `{ data, meta }`.
+ * @param {string} input.query
+ * @param {number} [input.k]
+ * @param {number} [input.threshold]
+ * @returns {Promise<Object>}
  */
 export const searchQuestionsSemanticService = async ({
   query,
@@ -466,29 +812,57 @@ export const searchQuestionsSemanticService = async ({
 }) => {
   const queryVector = await embedText(query, "RETRIEVAL_QUERY");
 
-  const vectorSql =
-    "SELECT question_id, embedding FROM question_vectors WHERE status = 'ready'";
+  /*
+   * PART 14
+   *
+   * Only use vectors belonging to
+   * visible questions.
+   */
+  const vectorSql = `
+      SELECT
+        qv.question_id,
+        qv.embedding
+
+      FROM question_vectors qv
+
+      JOIN questions q
+        ON q.question_id =
+           qv.question_id
+
+      WHERE qv.status = 'ready'
+        AND q.is_hidden = FALSE
+    `;
+
   const vectorRows = await safeExecute(vectorSql, []);
 
   const scored = vectorRows
     .map((row) => ({
       questionId: row.question_id,
+
       score: cosineSimilarity(queryVector, parseEmbedding(row.embedding)),
     }))
+
     .filter((item) => item.score >= threshold)
+
     .sort((a, b) => b.score - a.score)
+
     .slice(0, k);
 
   console.log(
-    `[Semantic search] vectors=${vectorRows.length} queryDim=${queryVector.length} threshold=${threshold} k=${k} topScores=${scored
-      .slice(0, 5)
-      .map((item) => item.score.toFixed(4))
-      .join(", ")}`,
+    `[Semantic search] vectors=${vectorRows.length} ` +
+      `queryDim=${queryVector.length} ` +
+      `threshold=${threshold} ` +
+      `k=${k} ` +
+      `topScores=${scored
+        .slice(0, 5)
+        .map((item) => item.score.toFixed(4))
+        .join(", ")}`,
   );
 
   const data = await hydrateQuestionDetails(
     scored.map((item) => item.questionId),
   );
+
   const scoreById = new Map(
     scored.map((item) => [item.questionId, item.score]),
   );
@@ -496,40 +870,68 @@ export const searchQuestionsSemanticService = async ({
   return {
     data: data.map((question) => ({
       ...question,
+
       score: scoreById.get(question.id) ?? 0,
     })),
+
     meta: {
       total: data.length,
+
       k,
+
       threshold,
+
       query,
+
       questionHash: null,
     },
   };
 };
 
 /**
- * Finds questions similar to the given one using its stored embedding.
+ * Finds visible questions similar to the given one.
+ *
+ * PART 15
+ *
+ * Hidden questions are excluded both:
+ *
+ * 1. As the source question
+ * 2. As recommended questions
  *
  * @param {Object} input
- * @param {string} input.questionHash - Source question hash.
- * @param {number} [input.k] - Max results.
- * @param {number} [input.threshold] - Minimum cosine score.
- * @returns {Promise<Object>} `{ data, meta }`.
- * @throws {NotFoundError} When the source question does not exist.
+ * @param {string} input.questionHash
+ * @param {number} [input.k]
+ * @param {number} [input.threshold]
+ * @returns {Promise<Object>}
  */
 export const getSimilarQuestionsService = async ({
   questionHash,
   k = RECOMMEND_K,
   threshold = RECOMMEND_THRESHOLD,
 }) => {
+  /*
+   * PART 15 — SOURCE QUESTION
+   *
+   * The source question itself must
+   * also be visible.
+   */
   const sourceSql = `
-    SELECT q.question_id, qv.embedding
-    FROM questions q
-    JOIN question_vectors qv ON qv.question_id = q.question_id
-    WHERE q.question_hash = ?
-    LIMIT 1
-  `;
+      SELECT
+        q.question_id,
+        qv.embedding
+
+      FROM questions q
+
+      JOIN question_vectors qv
+        ON qv.question_id =
+           q.question_id
+
+      WHERE q.question_hash = ?
+        AND q.is_hidden = FALSE
+
+      LIMIT 1
+    `;
+
   const sourceRows = await safeExecute(sourceSql, [questionHash]);
 
   if (sourceRows.length === 0) {
@@ -537,31 +939,70 @@ export const getSimilarQuestionsService = async ({
   }
 
   const sourceId = sourceRows[0].question_id;
+
   const sourceVector = parseEmbedding(sourceRows[0].embedding);
 
   if (sourceVector.length === 0) {
     return {
       data: [],
-      meta: { total: 0, k, threshold, query: null, questionHash },
+
+      meta: {
+        total: 0,
+        k,
+        threshold,
+        query: null,
+        questionHash,
+      },
     };
   }
 
-  const vectorSql =
-    "SELECT question_id, embedding FROM question_vectors WHERE status = 'ready' AND question_id <> ?";
+  /*
+   * PART 15 — RECOMMENDED QUESTIONS
+   *
+   * Only ready vectors belonging to
+   * visible questions are considered.
+   */
+  const vectorSql = `
+      SELECT
+        qv.question_id,
+        qv.embedding
+
+      FROM question_vectors qv
+
+      JOIN questions q
+        ON q.question_id =
+           qv.question_id
+
+      WHERE qv.status = 'ready'
+        AND q.is_hidden = FALSE
+        AND qv.question_id <> ?
+    `;
+
   const vectorRows = await safeExecute(vectorSql, [sourceId]);
 
   const scored = vectorRows
     .map((row) => ({
       questionId: row.question_id,
+
       score: cosineSimilarity(sourceVector, parseEmbedding(row.embedding)),
     }))
+
     .filter((item) => item.score >= threshold)
+
     .sort((a, b) => b.score - a.score)
+
     .slice(0, k);
 
+  /*
+   * Hydrate only visible questions.
+   *
+   * hydrateQuestionDetails() also checks
+   * q.is_hidden = FALSE.
+   */
   const data = await hydrateQuestionDetails(
     scored.map((item) => item.questionId),
   );
+
   const scoreById = new Map(
     scored.map((item) => [item.questionId, item.score]),
   );
@@ -569,13 +1010,19 @@ export const getSimilarQuestionsService = async ({
   return {
     data: data.map((question) => ({
       ...question,
+
       score: scoreById.get(question.id) ?? 0,
     })),
+
     meta: {
       total: data.length,
+
       k,
+
       threshold,
+
       query: null,
+
       questionHash,
     },
   };

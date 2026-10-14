@@ -53,7 +53,10 @@ export default function AdminDashboard() {
     };
   }, []);
 
-  if (user?.role !== "admin") {
+  // if (user?.role !== "admin") {
+  //   return <Navigate to="/dashboard" replace />;
+  // }
+  if (!["admin", "super-admin"].includes(user?.role)) {
     return <Navigate to="/dashboard" replace />;
   }
 

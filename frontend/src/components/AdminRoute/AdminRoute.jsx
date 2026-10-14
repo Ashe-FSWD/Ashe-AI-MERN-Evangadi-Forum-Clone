@@ -9,7 +9,10 @@ import ProtectedRoute from "../ProtectedRoute/ProtectedRoute.jsx";
 export default function AdminRoute({ children }) {
   const { user } = useAuth();
 
-  if (user?.role !== "admin") {
+  // if (user?.role !== "admin") {
+  //   return <Navigate to="/dashboard" replace />;
+  // }
+  if (user?.role !== "admin" && user?.role !== "super-admin") {
     return <Navigate to="/dashboard" replace />;
   }
 

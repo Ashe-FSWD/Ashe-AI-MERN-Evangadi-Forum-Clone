@@ -1,5 +1,5 @@
 /**
- * Admin Users: view all accounts, promote/demote, deactivate, or delete.
+ * Admin Users: view all accounts, promote/demote, activate/deactivate, or delete.
  */
 import { useState, useEffect, useCallback } from "react";
 import {
@@ -24,6 +24,8 @@ export default function AdminUsers() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [busyId, setBusyId] = useState(null);
+
+  const isSuperAdmin = user?.role === "super-admin";
 
   const loadUsers = useCallback(async () => {
     setIsLoading(true);
@@ -94,8 +96,8 @@ export default function AdminUsers() {
       <div className={styles.adminHeader}>
         <h3 className={styles.adminTitle}>Manage Users</h3>
         <p className={styles.adminSubtitle}>
-          All registered accounts. You can promote to admin, deactivate, or
-          delete users.
+          All registered accounts. You can promote, activate, deactivate, or
+          manage users.
         </p>
       </div>
 
@@ -158,14 +160,22 @@ export default function AdminUsers() {
                     </td>
                     <td>
                       <span
-                        className={`${styles.pill} ${u.role === "admin" ? styles.pillAdmin : styles.pillUser}`}
+                        className={`${styles.pill} ${
+                          u.role === "super-admin"
+                            ? styles.pillSuperAdmin
+                            : u.role === "admin"
+                              ? styles.pillAdmin
+                              : styles.pillUser
+                        }`}
                       >
                         {u.role}
                       </span>
                     </td>
                     <td>
                       <span
-                        className={`${styles.pill} ${u.isActive ? styles.pillActive : styles.pillInactive}`}
+                        className={`${styles.pill} ${
+                          u.isActive ? styles.pillActive : styles.pillInactive
+                        }`}
                       >
                         {u.isActive ? "Active" : "Inactive"}
                       </span>
@@ -183,26 +193,36 @@ export default function AdminUsers() {
                     </td>
                     <td>
                       <div className={styles.cellActions}>
-                        <button
-                          type="button"
-                          className={styles.btn}
-                          disabled={busy || isSelf}
-                          onClick={() =>
-                            handleRole(u, u.role === "admin" ? "user" : "admin")
-                          }
-                          title={
-                            u.role === "admin"
-                              ? "Demote to user"
-                              : "Promote to admin"
-                          }
-                        >
-                          {u.role === "admin" ? (
-                            <ShieldOff size={14} aria-hidden />
-                          ) : (
+                        {/* Promote: Available for regular users (Admins & Super-Admins can promote) */}
+                        {u.role === "user" && (
+                          <button
+                            type="button"
+                            className={styles.btn}
+                            disabled={busy || isSelf}
+                            onClick={() => handleRole(u, "admin")}
+                            title="Promote to admin"
+                          >
                             <Shield size={14} aria-hidden />
+                            Promote
+                          </button>
+                        )}
+
+                        {/* Demote: ONLY for Super-Admins */}
+                        {isSuperAdmin &&
+                          (u.role === "admin" || u.role === "super-admin") && (
+                            <button
+                              type="button"
+                              className={styles.btn}
+                              disabled={busy || isSelf}
+                              onClick={() => handleRole(u, "user")}
+                              title="Demote to user"
+                            >
+                              <ShieldOff size={14} aria-hidden />
+                              Demote
+                            </button>
                           )}
-                          {u.role === "admin" ? "Demote" : "Promote"}
-                        </button>
+
+                        {/* Activate / Deactivate: Available for BOTH Admin and Super-Admin */}
                         <button
                           type="button"
                           className={styles.btn}
@@ -217,15 +237,20 @@ export default function AdminUsers() {
                           )}
                           {u.isActive ? "Deactivate" : "Activate"}
                         </button>
-                        <button
-                          type="button"
-                          className={`${styles.btn} ${styles.btnDanger}`}
-                          disabled={busy || isSelf}
-                          onClick={() => handleDelete(u)}
-                        >
-                          <Trash2 size={14} aria-hidden />
-                          Delete
-                        </button>
+
+                        {/* Delete: ONLY for Super-Admins */}
+                        {isSuperAdmin && (
+                          <button
+                            type="button"
+                            className={`${styles.btn} ${styles.btnDanger}`}
+                            disabled={busy || isSelf}
+                            onClick={() => handleDelete(u)}
+                            title="Delete user"
+                          >
+                            <Trash2 size={14} aria-hidden />
+                            Delete
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
