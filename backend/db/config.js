@@ -1,6 +1,5 @@
 import dotenv from "dotenv";
 dotenv.config();
-
 import mysql from "mysql2/promise";
 
 const sslEnabled =
@@ -11,7 +10,8 @@ const ssl = sslEnabled
   ? {
       // Aiven recommends verifying the server certificate using its CA.
       ...(sslCa ? { ca: sslCa.replace(/\\n/g, "\n") } : {}),
-      rejectUnauthorized: true,
+      // rejectUnauthorized: true,
+      rejectUnauthorized: false,
     }
   : undefined;
 
