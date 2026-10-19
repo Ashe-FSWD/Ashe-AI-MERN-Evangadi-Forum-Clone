@@ -1,55 +1,51 @@
 import axios from "axios";
 
-/**
- * Configured axios instance for API communication.
- */
+// Local development uses localhost.
+// Production uses the deployed Render backend.
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ||
+  (import.meta.env.DEV
+    ? "http://localhost:3777"
+    : "https://ashe-ai-mern-evangadi-forum-clone.onrender.com");
+
 const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || "http://localhost:3777",
-  // Generous default: AI endpoints can legitimately take 30-60s on free-tier
-  // quota backoff. Individual calls may override with their own timeout.
+  baseURL: API_BASE_URL.replace(/\/+$/, ""),
   timeout: 60000,
   headers: {
     "Content-Type": "application/json",
   },
 });
 
-/**
- * Request interceptor to attach the JWT token to headers.
- */
+// Attach the JWT token to authenticated requests.
 apiClient.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem("token");
+
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+
     return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  },
+  (error) => Promise.reject(error),
 );
 
-/**
- * Response interceptor to handle global 401 unauthorized errors.
- */
+// Handle expired or invalid authentication tokens.
 apiClient.interceptors.response.use(
-  (response) => {
-    return response;
-  },
+  (response) => response,
   (error) => {
-    // Skip global 401 redirect for auth endpoints so components can handle login/register errors
+    const requestUrl = error.config?.url || "";
+
     const isAuthEndpoint =
-      error.config?.url?.includes("/api/auth/login") ||
-      error.config?.url?.includes("/api/auth/register");
+      requestUrl.includes("/api/auth/login") ||
+      requestUrl.includes("/api/auth/register");
 
     if (error.response?.status === 401 && !isAuthEndpoint) {
-      // Clear authentication data
       localStorage.removeItem("token");
       localStorage.removeItem("user");
-
-      // Redirect to login page
       window.location.href = "/auth";
     }
+
     return Promise.reject(error);
   },
 );
